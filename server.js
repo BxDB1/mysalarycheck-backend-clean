@@ -5,18 +5,16 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Global variable to store form data temporarily
-let pendingFormData = {};
-
 // Debug: Check if environment variables are loaded
 console.log('Environment variables check:');
 console.log('SUPABASE_URL:', process.env.SUPABASE_URL ? 'Loaded' : 'Missing');
 console.log('SUPABASE_SERVICE_KEY:', process.env.SUPABASE_SERVICE_KEY ? 'Loaded' : 'Missing');
+console.log('PERPLEXITY_API_KEY:', process.env.PERPLEXITY_API_KEY ? 'Loaded' : 'Missing');
 
 app.use(cors());
 app.use(express.json());
 
-// Industry mapping - add this after line 17
+// Industry mapping
 const INDUSTRY_MAP = {
   '1': 'Technology',
   '2': 'Healthcare',
@@ -135,57 +133,45 @@ const INDUSTRY_MAP = {
   '115': 'Training & Development'
 };
 
-// Helper function to get market analysis
+// Helper function to get market analysis from Perplexity
 async function getMarketAnalysis({ jobTitle, industry, location, yearsExperience }) {
-  console.log('=== PERPLEXITY REQUEST DEBUG ===');
-  console.log('Request parameters:', { jobTitle, industry, location, yearsExperience });
+  console.log('=== PERPLEXITY REQUEST ===');
+  console.log('Parameters:', { jobTitle, industry, location, yearsExperience });
   
   try {
-    // Get Perplexity API key from Supabase
-    const { createClient } = require('@supabase/supabase-js');
-    const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
-    
-const apiKey = process.env.PERPLEXITY_API_KEY;
+    const apiKey = process.env.PERPLEXITY_API_KEY;
 
-console.log('Using API key:', apiKey ? 'Found' : 'Missing');
+    if (!apiKey) {
+      throw new Error('PERPLEXITY_API_KEY not configured');
+    }
 
-console.log('API key starts with:', apiKey?.substring(0, 10));
-
-    // Create the prompt
     const prompt = `Analyze the current job market and salary expectations for a ${jobTitle} in the ${industry} industry, located in ${location}, with ${yearsExperience} years of experience. 
 
 Provide specific insights on:
 1. Current market demand and trends
-2. Salary ranges (local and USD)
+2. Salary ranges (monthly and annual in local currency and USD)
 3. Key skills in demand
-4. Notable achievements to highlight
-5. Regional market factors
-6. Hiring trends and demand outlook
+4. Regional market factors
+5. Hiring trends and demand outlook
 
-Please format your response as JSON with this structure:
+Please format your response as JSON with this EXACT structure:
 {
-  "marketTarget": {"local": 130000, "usd": 130000},
-  "premiumsNote": "Brief note about salary factors",
-  "demandNotes": ["High demand insight", "Another demand point"],
-  "regionalNotes": ["Regional market insight"],
-  "macroNotes": ["Economic factor"],
-  "hiringNotes": ["Hiring trend 1", "Hiring trend 2"],
+  "marketTarget": {"local": 92000, "usd": 92000},
+  "salaryRange": {
+    "monthly": {"min": 5650, "max": 9700, "usd": {"min": 5650, "max": 9700}, "local": {"min": 5650, "max": 9700}},
+    "annual": {"min": 67800, "max": 116400, "usd": {"min": 67800, "max": 116400}, "local": {"min": 67800, "max": 116400}}
+  },
+  "premiumsNote": "Brief note about salary factors and premiums",
+  "demandNotes": ["High demand insight 1", "Market trend 2", "Industry factor 3"],
+  "regionalNotes": ["Regional market insight 1", "Location factor 2"],
+  "macroNotes": ["Economic factor 1", "Industry trend 2"],
+  "hiringNotes": ["Hiring trend 1", "Demand insight 2", "Market condition 3"],
   "citations": [{"title": "Source Name", "url": "https://example.com"}],
   "highDemand": true,
   "locationPremium": true
 }
 
-Use the most current salary data available. Be specific with numbers.`;
-
-    console.log('Prompt being sent:', prompt);
-
-    const requestBody = {
-      model: "sonar-pro",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.1
-    };
-
-    console.log('Full request body:', JSON.stringify(requestBody, null, 2));
+Use the most current salary data available. Be specific with numbers. Return ONLY valid JSON, no markdown formatting.`;
 
     const response = await fetch('https://api.perplexity.ai/chat/completions', {
       method: 'POST',
@@ -193,81 +179,43 @@ Use the most current salary data available. Be specific with numbers.`;
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify(requestBody)
+      body: JSON.stringify({
+        model: "sonar-pro",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.1
+      })
     });
-
-    console.log('Perplexity response status:', response.status);
-    console.log('Perplexity response headers:', Object.fromEntries(response.headers.entries()));
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.log('Perplexity error response:', errorText);
+      console.error('Perplexity API error:', errorText);
       throw new Error(`Perplexity API error: ${response.status}`);
     }
 
     const data = await response.json();
-    console.log('Perplexity success response keys:', Object.keys(data));
-    console.log('Message content:', data.choices[0].message.content);
-    
     const content = data.choices[0].message.content;
-    console.log('Raw content to parse:', content);
-
-    // Extract JSON from response
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    
+    // Extract JSON from response (handles markdown code blocks)
+    let jsonText = content;
+    const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/) || content.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
-      console.log('Found JSON match:', jsonMatch[0]);
-      try {
-        const marketData = JSON.parse(jsonMatch[0]);
-        console.log('Successfully parsed market data:', marketData);
-        
-        // Transform the data to match frontend expectations
-        const transformedData = {
-          ...marketData,
-          // Add any fields your frontend might be looking for
-          usd: marketData.marketTarget?.usd || marketData.marketTarget?.local,
-          local: marketData.marketTarget?.local || marketData.marketTarget?.usd,
-          // Ensure all expected fields exist
-          marketTarget: marketData.marketTarget,
-          premiumsNote: marketData.premiumsNote || "",
-          demandNotes: marketData.demandNotes || [],
-          regionalNotes: marketData.regionalNotes || [],
-          macroNotes: marketData.macroNotes || [],
-          hiringNotes: marketData.hiringNotes || [],
-          citations: marketData.citations || [],
-          highDemand: marketData.highDemand || false,
-          locationPremium: marketData.locationPremium || false
-        };
-        
-        console.log('Transformed data for frontend:', transformedData);
-        return transformedData;
-      } catch (parseError) {
-        console.log('JSON parse error:', parseError.message);
-        console.log('Failed to parse this JSON:', jsonMatch[0]);
-        throw new Error('Failed to parse market analysis JSON');
-      }
-    } else {
-      console.log('No JSON found in response, raw content:', content);
-      // Return a default structure if no JSON found
-      return {
-        marketTarget: { local: 150000, usd: 150000 },
-        premiumsNote: "Based on current market analysis",
-        demandNotes: ["High demand for data science skills"],
-        regionalNotes: ["San Francisco Bay Area premium"],
-        macroNotes: ["Technology sector growth"],
-        hiringNotes: ["Strong hiring demand"],
-        citations: [],
-        highDemand: true,
-        locationPremium: true
-      };
+      jsonText = jsonMatch[1] || jsonMatch[0];
     }
 
+    const marketData = JSON.parse(jsonText);
+    console.log('✅ Market analysis completed');
+    
+    return marketData;
+
   } catch (error) {
-    console.log('=== FULL ERROR DETAILS ===');
-    console.log('Error message:', error.message);
-    console.log('Error stack:', error.stack);
+    console.error('❌ Market analysis error:', error.message);
     throw error;
   }
 }
+
+// ==========================================
+// API ENDPOINTS
+// ==========================================
 
 // Test Supabase connection
 app.get('/api/test-supabase', async (req, res) => {
@@ -275,7 +223,7 @@ app.get('/api/test-supabase', async (req, res) => {
     const { createClient } = require('@supabase/supabase-js');
     const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
     
-    const { data, error } = await supabase.from('api_keys').select('service_name').limit(1);
+    const { data, error } = await supabase.from('reports').select('session_id').limit(1);
     
     if (error) {
       res.json({ error: error.message });
@@ -287,223 +235,269 @@ app.get('/api/test-supabase', async (req, res) => {
   }
 });
 
-// Debug API key retrieval
-app.get('/api/debug-keys', async (req, res) => {
+// Get report data (used by the report page)
+app.get('/api/user-data/:id', async (req, res) => {
+  const reportId = req.params.id;
+  console.log('=== FETCHING REPORT ===');
+  console.log('Report ID:', reportId);
+  
   try {
     const { createClient } = require('@supabase/supabase-js');
     const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
-    
-    const { data, error } = await supabase
-      .from('api_keys')
-      .select('service_name, api_key')
-      .eq('service_name', 'perplexity');
-    
-    res.json({ 
-      data: data?.map(row => ({ 
-        service_name: row.service_name, 
-        has_key: !!row.api_key,
-        key_length: row.api_key?.length || 0,
-        key_start: row.api_key?.substring(0, 10) || 'none'
-      })) 
-    });
-  } catch (err) {
-    res.json({ error: err.message });
-  }
-});
 
-// Get user data and trigger fresh market analysis
-app.get('/api/user-data/:id', async (req, res) => {
-  const reportId = req.params.id;
-  console.log('=== USER DATA REQUEST ===');
-  console.log('Fetching user data for report:', reportId);
-  
-  try {
-    let formData = null;
-    
-    // Check if we have stored form data
-    console.log('Looking for form data with report ID:', reportId);
-    console.log('Available form data keys:', Object.keys(pendingFormData));
+    const { data: reportData, error } = await supabase
+      .from('reports')
+      .select('*')
+      .eq('session_id', reportId)
+      .single();
 
-    // First check: direct report ID match
-    if (pendingFormData[reportId]) {
-      console.log('Using stored form data (direct match):', pendingFormData[reportId]);
-      formData = pendingFormData[reportId];
-    }
-    // Second check: converted payment ID match (fallback)
-    else {
-      const paymentId = reportId.replace('test-report-', 'local-payment-');
-      console.log('Converted to payment ID:', paymentId);
-      if (pendingFormData[paymentId]) {
-        console.log('Using stored form data (converted match):', pendingFormData[paymentId]);
-        formData = pendingFormData[paymentId];
-      }
+    if (error || !reportData) {
+      console.error('❌ Report not found:', error);
+      return res.status(404).json({ error: 'Report not found' });
     }
 
-    if (formData) {
-      // Get market analysis
-      const jobData = {
-        jobTitle: formData.jobTitle,
-        industry: formData.industry === 'other' ? formData.customIndustry : (INDUSTRY_MAP[formData.industry] || formData.industry),
-        location: formData.location,
-        yearsExperience: formData.yearsExperience
-      };
-      console.log('Converted job data:', jobData);
-      const marketData = await getMarketAnalysis(jobData);
-      
-      // Return BOTH form data AND market data
-      const response = {
-        // Form data fields
-        name: formData.name,
-        jobTitle: formData.jobTitle,
-        industry: INDUSTRY_MAP[formData.industry] || formData.customIndustry || formData.industry,
-        customIndustry: formData.customIndustry,
-        location: formData.location,
-        yearsExperience: formData.yearsExperience,
-        currentSalary: formData.currentSalary,
-        companyName: formData.companyName,
-        achievement: formData.achievement,
-        // Market data fields
-        ...marketData
-      };
-      
-      return res.json(response);
-    }
+    console.log('✅ Report found');
 
-    // Fallback to defaults if no form data found
-    console.log('No form data found, using defaults');
-    const defaultData = {
-      jobTitle: "Data Scientist",
-      industry: "Technology", 
-      location: "San Francisco, CA",
-      yearsExperience: "5"
+    // Parse JSON fields if they're strings
+    const parsedReportData = typeof reportData.report_data === 'string' 
+      ? JSON.parse(reportData.report_data) 
+      : reportData.report_data;
+
+    const parsedMarketAnalysis = typeof reportData.market_analysis === 'string'
+      ? JSON.parse(reportData.market_analysis)
+      : reportData.market_analysis;
+
+    const response = {
+      ...parsedReportData,
+      marketAnalysis: parsedMarketAnalysis,
+      payment_status: reportData.payment_status,
+      created_at: reportData.created_at
     };
-    
-    const marketData = await getMarketAnalysis(defaultData);
-    return res.json({
-      name: "Professional User",
-      jobTitle: defaultData.jobTitle,
-      industry: defaultData.industry,
-      location: defaultData.location,
-      yearsExperience: defaultData.yearsExperience,
-      currentSalary: "0",
-      ...marketData
-    });
+
+    res.json(response);
     
   } catch (error) {
-    console.log('Error in user-data endpoint:', error.message);
-    res.status(500).json({ error: 'Failed to load report data' });
+    console.error('❌ Error fetching report:', error);
+    res.status(500).json({ error: 'Failed to load report' });
   }
 });
 
-// Original perplexity-analysis endpoint (kept for direct API calls)
+// Direct market analysis endpoint
 app.post('/api/perplexity-analysis', async (req, res) => {
   const { jobTitle, industry, location, yearsExperience } = req.body;
+  
+  console.log('=== DIRECT ANALYSIS REQUEST ===');
   
   try {
     const analysisData = await getMarketAnalysis({ jobTitle, industry, location, yearsExperience });
     res.json(analysisData);
   } catch (error) {
+    console.error('❌ Analysis failed:', error);
     res.status(500).json({ error: 'Failed to get market analysis' });
   }
 });
 
-// Razorpay init endpoint (FIXED - removed duplicate)
-app.post('/api/razorpay-init', async (req, res) => {
+// ==========================================
+// POLAR WEBHOOK - HANDLES PAYMENT COMPLETION
+// ==========================================
+app.post('/api/webhooks/polar', async (req, res) => {
   try {
-    console.log('=== RAZORPAY INIT REQUEST ===');
-    const { userEmail, formData } = req.body;
-    console.log('User email:', userEmail);
-    console.log('Form data:', formData);
-    
-    const razorpayKeyId = process.env.RAZORPAY_KEY_ID;
-    console.log('Razorpay key available:', !!razorpayKeyId);
-    
-    if (!razorpayKeyId) {
-      throw new Error('Razorpay Key ID not configured');
+    const event = req.body;
+    console.log('📨 POLAR WEBHOOK RECEIVED:', JSON.stringify(event, null, 2));
+
+    if (event.type === 'checkout.completed' || event.type === 'order.created') {
+      const sessionId = event.data.id;
+      
+      console.log('✅ Payment completed for session:', sessionId);
+
+      const { createClient } = require('@supabase/supabase-js');
+      const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+
+      // Fetch the report
+      const { data: reportData, error: fetchError } = await supabase
+        .from('reports')
+        .select('*')
+        .eq('session_id', sessionId)
+        .single();
+
+      if (fetchError) {
+        console.error('❌ Report not found:', fetchError);
+        return res.status(404).json({ error: 'Report not found' });
+      }
+
+      console.log('📄 Found report');
+
+      // Update payment status
+      const { error: updateError } = await supabase
+        .from('reports')
+        .update({
+          payment_status: 'completed',
+          updated_at: new Date().toISOString()
+        })
+        .eq('session_id', sessionId);
+
+      if (updateError) {
+        console.error('❌ Failed to update payment status:', updateError);
+        return res.status(500).json({ error: 'Database update failed' });
+      }
+
+      console.log('✅ Payment status updated');
+
+      // Parse report data
+      const parsedData = typeof reportData.report_data === 'string' 
+        ? JSON.parse(reportData.report_data) 
+        : reportData.report_data;
+
+      // Prepare job data
+      const jobData = {
+        jobTitle: parsedData.jobTitle,
+        industry: parsedData.industry === 'other' 
+          ? parsedData.customIndustry 
+          : (INDUSTRY_MAP[parsedData.industry] || parsedData.industry),
+        location: parsedData.location,
+        yearsExperience: parsedData.yearsExperience
+      };
+
+      console.log('🔍 Triggering analysis');
+
+      // Get market analysis
+      try {
+        const marketData = await getMarketAnalysis(jobData);
+
+        // Save analysis
+        const { error: analysisError } = await supabase
+          .from('reports')
+          .update({
+            market_analysis: marketData,
+            updated_at: new Date().toISOString()
+          })
+          .eq('session_id', sessionId);
+
+        if (!analysisError) {
+          console.log('✅ Analysis saved');
+        }
+      } catch (analysisError) {
+        console.error('❌ Analysis failed:', analysisError);
+      }
+
+      return res.status(200).json({ 
+        success: true,
+        sessionId
+      });
     }
-    
-    const paymentId = 'local-payment-' + Date.now();
-    
-    // Store form data temporarily with paymentId as key
-    pendingFormData[paymentId] = formData;
-    console.log('Stored form data for payment:', paymentId);
-    
-    const response = {
-      razorpayKeyId: razorpayKeyId,
-      paymentId: paymentId,
-      amount: 1000,
-      currency: 'USD'
-    };
-    
-    console.log('Sending response:', response);
-    res.json(response);
+
+    return res.status(200).json({ received: true });
+
   } catch (error) {
-    console.error('Razorpay init error:', error.message);
-    res.status(500).json({ error: error.message });
+    console.error('❌ WEBHOOK ERROR:', error);
+    return res.status(500).json({ error: 'Webhook failed' });
   }
 });
 
-// Razorpay verify endpoint
-app.post('/api/razorpay-verify', async (req, res) => {
+// ==========================================
+// POLAR WEBHOOK - HANDLES PAYMENT COMPLETION
+// ==========================================
+app.post('/api/webhooks/polar', async (req, res) => {
   try {
-    console.log('=== RAZORPAY VERIFY REQUEST ===');
-    const { razorpayPaymentId, razorpayOrderId, razorpaySignature, paymentId } = req.body;
-    console.log('Payment verification data:', { razorpayPaymentId, razorpayOrderId, paymentId });
-    
-    // Get the stored form data
-    const formData = pendingFormData[paymentId];
-    console.log('Retrieved form data:', formData);
-    
-    let reportId = 'test-report-' + Date.now();
-    
-    if (formData) {
-      // Save to Supabase (keep trying this for when it works)
+    const event = req.body;
+    console.log('📨 POLAR WEBHOOK RECEIVED:', JSON.stringify(event, null, 2));
+
+    if (event.type === 'order.paid' || event.type === 'order.created') {
+      const sessionId = event.data.id;
+      
+      console.log('✅ Payment event for session:', sessionId);
+
       const { createClient } = require('@supabase/supabase-js');
       const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
-      
-      const { data, error } = await supabase
+
+      // Fetch the report
+      const { data: reportData, error: fetchError } = await supabase
         .from('reports')
-        .insert({
-          report_data: {
-            profile: {
-              name: formData.name,
-              role: formData.jobTitle,
-              industry: formData.industry === 'other' ? formData.customIndustry : (INDUSTRY_MAP[formData.industry] || formData.industry),
-              location: formData.location,
-              experience: formData.yearsExperience,
-              currentSalary: formData.currentSalary,
-              companyName: formData.companyName,
-              achievement: formData.achievement
-            }
-          }
-        })
-        .select()
+        .select('*')
+        .eq('session_id', sessionId)
         .single();
-      
-      if (error) {
-        console.error('Error saving to database:', error);
-      } else {
-        console.log('Successfully saved form data to database:', data.id);
-        reportId = data.id;
+
+      if (fetchError) {
+        console.error('❌ Report not found:', fetchError);
+        return res.status(200).json({ received: true }); // Return 200 anyway
       }
-      
-      // Store form data with report ID as key for fallback
-      pendingFormData[reportId] = formData;
-      console.log('Stored form data with report ID:', reportId);
+
+      console.log('📄 Found report');
+
+      // Update payment status
+      const { error: updateError } = await supabase
+        .from('reports')
+        .update({
+          payment_status: 'completed',
+          updated_at: new Date().toISOString()
+        })
+        .eq('session_id', sessionId);
+
+      if (updateError) {
+        console.error('❌ Failed to update payment:', updateError);
+      } else {
+        console.log('✅ Payment status updated');
+      }
+
+      // Parse report data
+      const parsedData = typeof reportData.report_data === 'string' 
+        ? JSON.parse(reportData.report_data) 
+        : reportData.report_data;
+
+      // Prepare job data
+      const jobData = {
+        jobTitle: parsedData.jobTitle,
+        industry: parsedData.industry === 'other' 
+          ? parsedData.customIndustry 
+          : (INDUSTRY_MAP[parsedData.industry] || parsedData.industry),
+        location: parsedData.location,
+        yearsExperience: parsedData.yearsExperience
+      };
+
+      console.log('🔍 Triggering analysis');
+
+      // Get market analysis
+      try {
+        const marketData = await getMarketAnalysis(jobData);
+
+        // Save analysis
+        const { error: analysisError } = await supabase
+          .from('reports')
+          .update({
+            market_analysis: marketData,
+            updated_at: new Date().toISOString()
+          })
+          .eq('session_id', sessionId);
+
+        if (!analysisError) {
+          console.log('✅ Analysis saved');
+        }
+      } catch (analysisError) {
+        console.error('❌ Analysis failed:', analysisError);
+      }
+
+      return res.status(200).json({ 
+        success: true,
+        sessionId
+      });
     }
-    
-    const response = {
-      success: true,
-      reportId: reportId
-    };
-    
-    console.log('Verification response:', response);
-    res.json(response);
+
+    return res.status(200).json({ received: true });
+
   } catch (error) {
-    console.error('Razorpay verify error:', error.message);
-    res.status(500).json({ error: error.message });
+    console.error('❌ WEBHOOK ERROR:', error);
+    return res.status(200).json({ received: true }); // Always return 200 to Polar
   }
 });
+
+// Start server
 app.listen(PORT, () => {
-  console.log(`Backend running on port ${PORT}`);
+  console.log(`✅ Backend running on port ${PORT}`);
+  console.log(`📍 Webhook: http://localhost:${PORT}/api/webhooks/polar`);
+});
+
+// Start server
+app.listen(PORT, () => {
+  console.log(`✅ Backend running on port ${PORT}`);
+  console.log(`📍 Webhook: http://localhost:${PORT}/api/webhooks/polar`);
 });
