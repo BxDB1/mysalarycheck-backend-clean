@@ -495,9 +495,3 @@ app.listen(PORT, () => {
   console.log(`✅ Backend running on port ${PORT}`);
   console.log(`📍 Webhook: http://localhost:${PORT}/api/webhooks/polar`);
 });
-
-// Start server
-app.listen(PORT, () => {
-  console.log(`✅ Backend running on port ${PORT}`);
-  console.log(`📍 Webhook: http://localhost:${PORT}/api/webhooks/polar`);
-});
