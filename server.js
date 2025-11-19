@@ -196,26 +196,44 @@ app.post('/api/webhooks/polar', async (req, res) => {
     console.log('📨 POLAR WEBHOOK RECEIVED:', JSON.stringify(event, null, 2));
 
     if (event.type === 'order.paid' || event.type === 'order.created' || event.type === 'checkout.completed') {
-      const sessionId = event.data.id;
-      
-      console.log('✅ Payment event for session:', sessionId);
+      // Try multiple possible session IDs
+const possibleIds = [
+  event.data.checkout_id,           // ✅ CHECKOUT ID FIRST!
+  event.data.id,                    // Order/Checkout main ID
+  event.data.checkout?.id,          // Nested checkout ID
+  event.data.metadata?.checkout_id  // Metadata checkout ID
+].filter(Boolean);
+
+      console.log('🔍 Searching for report with possible IDs:', possibleIds);
 
       const { createClient } = require('@supabase/supabase-js');
       const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
-      // Fetch the report
-      const { data: reportData, error: fetchError } = await supabase
-        .from('reports')
-        .select('*')
-        .eq('session_id', sessionId)
-        .single();
+      // Try to find the report with any of the possible IDs
+      let reportData = null;
+      let matchedId = null;
 
-      if (fetchError) {
-        console.error('❌ Report not found:', fetchError);
-        return res.status(200).json({ received: true }); // Return 200 anyway
+      for (const id of possibleIds) {
+        const { data, error } = await supabase
+          .from('reports')
+          .select('*')
+          .eq('session_id', id)
+          .maybeSingle(); // Use maybeSingle() instead of single()
+
+        if (data && !error) {
+          reportData = data;
+          matchedId = id;
+          console.log('✅ Found report with ID:', id);
+          break;
+        }
       }
 
-      console.log('📄 Found report');
+      if (!reportData) {
+        console.error('❌ Report not found with any ID:', possibleIds);
+        return res.status(200).json({ received: true, message: 'Report not found' });
+      }
+
+      console.log('📄 Found report with session_id:', matchedId);
 
       // Update payment status
       const { error: updateError } = await supabase
@@ -224,7 +242,7 @@ app.post('/api/webhooks/polar', async (req, res) => {
           payment_status: 'completed',
           updated_at: new Date().toISOString()
         })
-        .eq('session_id', sessionId);
+        .eq('session_id', matchedId);
 
       if (updateError) {
         console.error('❌ Failed to update payment:', updateError);
@@ -247,7 +265,7 @@ app.post('/api/webhooks/polar', async (req, res) => {
         yearsExperience: parsedData.yearsExperience
       };
 
-      console.log('🔍 Triggering analysis');
+      console.log('🔍 Triggering analysis for:', jobData);
 
       // Get market analysis
       try {
@@ -260,10 +278,12 @@ app.post('/api/webhooks/polar', async (req, res) => {
             market_analysis: marketData,
             updated_at: new Date().toISOString()
           })
-          .eq('session_id', sessionId);
+          .eq('session_id', matchedId);
 
         if (!analysisError) {
-          console.log('✅ Analysis saved');
+          console.log('✅ Analysis saved successfully');
+        } else {
+          console.error('❌ Failed to save analysis:', analysisError);
         }
       } catch (analysisError) {
         console.error('❌ Analysis failed:', analysisError);
@@ -271,7 +291,7 @@ app.post('/api/webhooks/polar', async (req, res) => {
 
       return res.status(200).json({ 
         success: true,
-        sessionId
+        sessionId: matchedId
       });
     }
 
@@ -279,7 +299,7 @@ app.post('/api/webhooks/polar', async (req, res) => {
 
   } catch (error) {
     console.error('❌ WEBHOOK ERROR:', error);
-    return res.status(200).json({ received: true }); // Always return 200 to Polar
+    return res.status(200).json({ received: true });
   }
 });
 
